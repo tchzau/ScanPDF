@@ -694,7 +694,27 @@ $('#auto').onclick = () => {
   ['pointerup', 'pointercancel'].forEach(ev => v.addEventListener(ev, () => { drag = -1; }));
 }
 /* ---------- Ghi PDF (tự viết, không cần thư viện) ---------- */
-function buildPdf(imgs, mode) {
+// Chuỗi Unicode trong PDF 1.4: UTF-16BE + BOM, biểu diễn hex <FEFF...>
+function pdfStr(s) {
+  let h = 'FEFF';
+  for (const ch of s) {
+    let c = ch.codePointAt(0);
+    if (c > 0xFFFF) {
+      const t = c - 0x10000;
+      h += (0xD800 | (t >> 10)).toString(16).padStart(4, '0');
+      h += (0xDC00 | (t & 0x3FF)).toString(16).padStart(4, '0');
+    } else h += c.toString(16).padStart(4, '0');
+  }
+  return '<' + h.toUpperCase() + '>';
+}
+function pdfInfo(title) {
+  const z = n => String(n).padStart(2, '0'), n = new Date();
+  const tz = -n.getTimezoneOffset(), s = tz >= 0 ? '+' : '-';
+  const th = z(Math.abs(tz) / 60 | 0), tm = z(Math.abs(tz) % 60);
+  const d = `D:${n.getFullYear()}${z(n.getMonth() + 1)}${z(n.getDate())}${z(n.getHours())}${z(n.getMinutes())}${z(n.getSeconds())}${s}${th}'${tm}`;
+  return `<</Title ${pdfStr(title)}/Author ${pdfStr('edumasterhub.io.vn')}/CreationDate (${d})/ModDate (${d})>>`;
+}
+function buildPdf(imgs, mode, title) {
   const enc = new TextEncoder(), parts = [], offs = []; let len = 0;
   const push = b => { if (typeof b === 'string') b = enc.encode(b); parts.push(b); len += b.length; };
   const obj = (n, fn) => { offs[n] = len; push(n + ' 0 obj\n'); fn(); push('\nendobj\n'); };
@@ -723,10 +743,12 @@ function buildPdf(imgs, mode) {
       push(im.data); push('\nendstream');
     });
   });
-  const xr = len, total = 3 * imgs.length + 3;
+  const infoId = 3 * imgs.length + 3;
+  obj(infoId, () => push(pdfInfo(title)));
+  const xr = len, total = 3 * imgs.length + 4;
   push(`xref\n0 ${total}\n0000000000 65535 f \n`);
   for (let n = 1; n < total; n++) push(String(offs[n]).padStart(10, '0') + ' 00000 n \n');
-  push(`trailer\n<</Size ${total}/Root 1 0 R>>\nstartxref\n${xr}\n%%EOF`);
+  push(`trailer\n<</Size ${total}/Root 1 0 R/Info ${infoId} 0 R>>\nstartxref\n${xr}\n%%EOF`);
   return new Blob(parts, { type: 'application/pdf' });
 }
 // Đóng gói ảnh BW (đã là 0/255) thành bitmap 1-bit rồi nén Flate — lossless, rất nhỏ
@@ -779,8 +801,9 @@ $('#export').onclick = async () => {
         out.push({ data: new Uint8Array(await blob.arrayBuffer()), w: c.width, h: c.height });
       }
     }
-    const pdf = buildPdf(out, $('#size').value), a = document.createElement('a');
-    a.href = URL.createObjectURL(pdf); a.download = ($('#name').value.trim() || 'tai-lieu') + '.pdf'; a.click();
+    const name = $('#name').value.trim() || 'tai-lieu';
+    const pdf = buildPdf(out, $('#size').value, name), a = document.createElement('a');
+    a.href = URL.createObjectURL(pdf); a.download = name + '.pdf'; a.click();
     st.textContent = `Đã xuất ${pages.length} trang (${(pdf.size / 1048576).toFixed(1)} MB).`;
     dirty = false; $('#after').hidden = false;
   } catch (e) { st.textContent = 'Lỗi khi xuất PDF: ' + e.message; }

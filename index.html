@@ -713,8 +713,14 @@ function buildPdf(imgs, mode) {
     const cs = `q ${dw.toFixed(2)} 0 0 ${dh.toFixed(2)} ${dx.toFixed(2)} ${dy.toFixed(2)} cm /Im0 Do Q`;
     obj(cn, () => push(`<</Length ${cs.length}>>\nstream\n${cs}\nendstream`));
     obj(inn, () => {
-      push(`<</Type/XObject/Subtype/Image/Width ${im.w}/Height ${im.h}/ColorSpace/DeviceRGB/BitsPerComponent 8/Filter/DCTDecode/Length ${im.jpg.length}>>\nstream\n`);
-      push(im.jpg); push('\nendstream');
+      if (im.kind === 'bw1') {
+        push(`<</Type/XObject/Subtype/Image/Width ${im.w}/Height ${im.h}/ColorSpace/DeviceGray/BitsPerComponent 1/Filter/FlateDecode/Length ${im.data.length}>>\nstream\n`);
+      } else if (im.kind === 'gray8') {
+        push(`<</Type/XObject/Subtype/Image/Width ${im.w}/Height ${im.h}/ColorSpace/DeviceGray/BitsPerComponent 8/Filter/FlateDecode/DecodeParms<</Predictor 15/Columns ${im.w}/Colors 1/BitsPerComponent 8>>/Length ${im.data.length}>>\nstream\n`);
+      } else {
+        push(`<</Type/XObject/Subtype/Image/Width ${im.w}/Height ${im.h}/ColorSpace/DeviceRGB/BitsPerComponent 8/Filter/DCTDecode/Length ${im.data.length}>>\nstream\n`);
+      }
+      push(im.data); push('\nendstream');
     });
   });
   const xr = len, total = 3 * imgs.length + 3;
@@ -723,6 +729,39 @@ function buildPdf(imgs, mode) {
   push(`trailer\n<</Size ${total}/Root 1 0 R>>\nstartxref\n${xr}\n%%EOF`);
   return new Blob(parts, { type: 'application/pdf' });
 }
+// Đóng gói ảnh BW (đã là 0/255) thành bitmap 1-bit rồi nén Flate — lossless, rất nhỏ
+async function encodeBW1(c) {
+  const w = c.width, h = c.height, d = c.getContext('2d').getImageData(0, 0, w, h).data;
+  const rb = (w + 7) >> 3, bits = new Uint8Array(rb * h);
+  for (let y = 0; y < h; y++) {
+    const off = y * rb;
+    for (let x = 0; x < w; x++) {
+      if (d[(y * w + x) * 4] >= 128) bits[off + (x >> 3)] |= 0x80 >> (x & 7);
+    }
+  }
+  const stream = new Blob([bits]).stream().pipeThrough(new CompressionStream('deflate'));
+  return new Uint8Array(await new Response(stream).arrayBuffer());
+}
+// Đóng gói ảnh grayscale 8-bit với PNG Paeth predictor + Flate — lossless.
+// Rất hiệu quả cho docgray (nền đã chuẩn hoá trắng → đa số delta = 0).
+async function encodeGray8(c) {
+  const w = c.width, h = c.height, d = c.getContext('2d').getImageData(0, 0, w, h).data;
+  const row = w + 1, out = new Uint8Array(row * h), prev = new Uint8Array(w);
+  for (let y = 0; y < h; y++) {
+    const base = y * row; out[base] = 4; // filter type: Paeth
+    let left = 0, upleft = 0;
+    for (let x = 0; x < w; x++) {
+      const px = d[(y * w + x) * 4], up = prev[x];
+      const p = left + up - upleft;
+      const pa = Math.abs(p - left), pb = Math.abs(p - up), pc = Math.abs(p - upleft);
+      const pred = pa <= pb && pa <= pc ? left : pb <= pc ? up : upleft;
+      out[base + 1 + x] = (px - pred) & 0xff;
+      upleft = up; left = px; prev[x] = px;
+    }
+  }
+  const stream = new Blob([out]).stream().pipeThrough(new CompressionStream('deflate'));
+  return new Uint8Array(await new Response(stream).arrayBuffer());
+}
 $('#export').onclick = async () => {
   const btn = $('#export'), st = $('#status'); btn.disabled = true;
   const [max, q] = $('#qual').value.split(',').map(Number), out = [];
@@ -730,9 +769,15 @@ $('#export').onclick = async () => {
     for (let i = 0; i < pages.length; i++) {
       st.textContent = `Đang xử lý trang ${i + 1}/${pages.length}...`;
       await new Promise(r => setTimeout(r, 0));
-      const c = render(pages[i], max);
-      const blob = await new Promise(r => c.toBlob(r, 'image/jpeg', q));
-      out.push({ jpg: new Uint8Array(await blob.arrayBuffer()), w: c.width, h: c.height });
+      const c = render(pages[i], max), f = pages[i].filter;
+      if (f === 'bw') {
+        out.push({ data: await encodeBW1(c), w: c.width, h: c.height, kind: 'bw1' });
+      } else if (f === 'docgray') {
+        out.push({ data: await encodeGray8(c), w: c.width, h: c.height, kind: 'gray8' });
+      } else {
+        const blob = await new Promise(r => c.toBlob(r, 'image/jpeg', q));
+        out.push({ data: new Uint8Array(await blob.arrayBuffer()), w: c.width, h: c.height });
+      }
     }
     const pdf = buildPdf(out, $('#size').value), a = document.createElement('a');
     a.href = URL.createObjectURL(pdf); a.download = ($('#name').value.trim() || 'tai-lieu') + '.pdf'; a.click();
